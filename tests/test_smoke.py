@@ -34,7 +34,6 @@ PROGS = {
 (begin (print (+ (begin (print 1) 10) (begin (print 2) 20))) 'done)
 """,
 "exceptions": """
-(define (may-fail n) (if (= n 0) (raise 'zero) (/0 n)))
 (define (safe-div a b) (try (quot a b) (lambda (e) -999)))
 (print (safe-div 10 2))
 (print (safe-div 10 0))

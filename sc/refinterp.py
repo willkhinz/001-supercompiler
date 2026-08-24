@@ -19,8 +19,13 @@ def run_program(prog: dict, fuel=50_000_000):
 
     try:
         env = {}
-        for name, lam in prog["defs"]:
-            env[name] = Closure(lam[1], lam[2], env)
+        for item in prog.get("items", []):
+            if item[0] == "def":
+                _, name, lam = item
+                env[name] = Closure(lam[1], lam[2], env)
+            elif item[0] == "val":
+                _, name, rhs = item
+                env[name] = eval_expr(rhs, env, out, steps, fuel)
         val = eval_expr(prog["body"], env, out, steps, fuel)
         status, res = "ok", val
     except ScmRaise as r:

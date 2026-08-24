@@ -28,6 +28,40 @@ from .lang import LangError, free_vars
 # ---------------------------------------------------------------- naming
 
 
+def _topology(items):
+    """Returns (def_names, pure_defs, order_index).
+
+    A def is *pure* when it captures no value-definitions and only captures
+    pure defs (fixpoint). Pure defs may be referenced from any fund body via
+    fresh closure construction; impure defs must be captured lexically and
+    therefore require source-order precedence.
+    """
+    def_names = [it[1] for it in items if it[0] == "def"]
+    lams = {it[1]: it[2] for it in items if it[0] == "def"}
+    val_names = {it[1] for it in items if it[0] == "val"}
+    order = {n: i for i, n in enumerate(def_names)}
+    # raw free vars per def
+    fvs = {}
+    for n, lam in lams.items():
+        fvs[n] = free_vars(lam) - set(lam[1])
+    # impureness seeds at value captures and propagates across def->def
+    # references (self- and mutual-edges excluded from blocking purity).
+    impure = {n for n in def_names if fvs[n] & val_names}
+    changed = True
+    while changed:
+        changed = False
+        for n in def_names:
+            if n in impure:
+                continue
+            for v in fvs[n]:
+                if v in lams and v != n and v in impure:
+                    impure.add(n)
+                    changed = True
+                    break
+    pure = set(def_names) - impure
+    return set(def_names), pure, order, lams
+
+
 class Namer:
     def __init__(self):
         self.n = 0
@@ -49,7 +83,12 @@ def closure_convert(prog: dict) -> dict:
     """
     namer = Namer()
     funds: dict = {}
-    top_names = {name for name, _ in prog["defs"]}
+    items = prog.get("items")
+    if items is None:
+        items = [("def", n, l) for n, l in prog.get("defs", [])]
+    top_names, pure_defs, def_order, _dl = _topology(items)
+    cur_def_pos = [None]  # source position of def being lifted
+    _cur_name = [None]
     # name -> (fid, [freevar names]); active letrec scope stack entries
     fn_map_stack = []
 
@@ -68,7 +107,7 @@ def closure_convert(prog: dict) -> dict:
             if fn is not None:
                 fid, fvs = fn
                 return ("mkclo", fid, [("var", v) for v in fvs])
-            if e[1] in top_names:
+            if e[1] in pure_defs:
                 return ("mkclo", e[1], [])
             return e
         if tag == "lam":
@@ -156,9 +195,22 @@ def closure_convert(prog: dict) -> dict:
             ren[p] = np_
             nparams.append(np_)
         nbody = rename_go(body, ren)
-        fv = sorted(v for v in (free_vars(nbody) - set(nparams))
-                    if v not in top_names and v not in skip_fv
-                    and lookup_fn(v) is None)
+        fv = []
+        for v in sorted(free_vars(nbody) - set(nparams)):
+            if v in skip_fv or lookup_fn(v) is not None:
+                continue
+            if v in top_names:
+                if v in pure_defs:
+                    continue  # reconstructed via fresh closure at use site
+                # impure def captured across funds: enforce source order
+                if cur_def_pos[0] is not None and \
+                        def_order.get(v, -1) >= cur_def_pos[0]:
+                    raise LangError(
+                        "function %r references later/non-pure definition %r; "
+                        "reorder definitions or remove the value capture"
+                        % (_cur_name[0], v))
+            fv.append(v)
+        fv = sorted(fv)
         lifted_body = go(nbody)
         fid = namer.fresh("$f")
         funds[fid] = (fv + nparams, lifted_body)
@@ -213,20 +265,31 @@ def closure_convert(prog: dict) -> dict:
     def _hide_all(ren, names):
         return {k: v for k, v in ren.items() if k not in names}
 
-    # ---- top-level defs
+    # ---- top level: weave defs and value-defines in source order so that
+    # function closures capture preceding value definitions correctly.
     out_funds = {}
-    prologue = []
-    for name, lam in prog["defs"]:
-        node = _lift(lam)
-        assert node[0] == "mkclo"
-        fid = node[1]
-        out_funds[name] = funds.pop(fid)
-        prologue.append((name, ("mkclo", name, [])))
-
-    main = prog["body"]
-    for name, mk in reversed(prologue):
-        main = ("let", [(name, mk)], main)
-    main = go(main)
+    top_names = set()
+    items = prog.get("items")
+    if items is None:
+        items = [("def", n, l) for n, l in prog.get("defs", [])]
+    for it in items:
+        if it[0] == "def":
+            top_names.add(it[1])
+    acc = go(prog["body"])
+    for it in reversed(items):
+        if it[0] == "val":
+            acc = ("let", [(it[1], go(it[2]))], acc)
+        else:
+            _, name, lam = it
+            cur_def_pos[0] = def_order.get(name)
+            _cur_name[0] = name
+            node = _lift(lam)
+            cur_def_pos[0] = None
+            assert node[0] == "mkclo"
+            fid = node[1]
+            out_funds[name] = funds.pop(fid)
+            acc = ("let", [(name, ("mkclo", name, node[2]))], acc)
+    main = acc
 
     out_funds.update(funds)
     return {"funds": out_funds, "main": main}

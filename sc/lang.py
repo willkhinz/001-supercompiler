@@ -37,6 +37,14 @@ class LangError(Exception):
     pass
 
 
+_prim_param_counter = [0]
+
+
+def _gensym_prim_param(i):
+    _prim_param_counter[0] += 1
+    return "pv%d" % _prim_param_counter[0]
+
+
 def _sym(x):
     return isinstance(x, tuple) and x and x[0] == "sym"
 
@@ -46,41 +54,40 @@ def _name(x):
 
 
 def desugar_top(forms) -> dict:
-    """forms: list of parsed sexps -> Program dict.
+    """forms -> Program {'items': [...], 'body': expr}
 
-    Non-lambda defines are supported by splicing them as let-bindings around
-    the remainder of the program (in order).
+    items is an ordered list preserving source order so closure conversion
+    can place function-closure creation after preceding value definitions:
+      ('def', name, lam)     -- lambda define
+      ('val', name, expr)    -- non-lambda define
     """
-    defs = []
-    pending_lets = []
+    items = []
     body_forms = []
     for f in forms:
         if isinstance(f, list) and f and _name(f[0]) == "define":
-            name = _name(f[1]) if not isinstance(f[1], list) else _name(f[1][0])
-            rhs_kind = f[2] if len(f) == 3 else None
-            is_lambda = isinstance(f[1], list) or (
-                isinstance(rhs_kind, list) and rhs_kind
-                and _name(rhs_kind[0]) == "lambda")
-            if is_lambda:
-                if pending_lets:
-                    # earlier value-defines must wrap this define too
-                    pass
+            if isinstance(f[1], list):
                 name2, lam = _desugar_define(f)
-                defs.append((name2, lam))
+                items.append(("def", name2, lam))
             else:
-                if len(f) != 3:
+                name = _name(f[1])
+                rhs = f[2] if len(f) == 3 else None
+                is_lambda = isinstance(rhs, list) and rhs and \
+                    _name(rhs[0]) == "lambda"
+                if is_lambda:
+                    _, lam = _desugar_define(["define", name, rhs])
+                    items.append(("def", name, lam))
+                elif rhs is not None:
+                    items.append(("val", name, desugar(rhs)))
+                else:
                     raise LangError("bad define: %r" % (f,))
-                pending_lets.append((name, desugar(f[2])))
         elif isinstance(f, list) and f and _name(f[0]) == "declare":
-            pass  # consumed by compiler options elsewhere
+            pass
         else:
             body_forms.append(f)
     if not body_forms:
         raise LangError("program has no top-level expression")
     body = desugar_begin(body_forms)
-    for n, rhs in reversed(pending_lets):
-        body = ("let", [(n, rhs)], body)
-    return {"defs": defs, "body": body}
+    return {"items": items, "body": body}
 
 
 def _desugar_define(f):
@@ -117,6 +124,13 @@ def desugar(x):
         n = x[1]
         if n == "nil":
             return ("const", None)
+        if n in PRIMS:
+            # primitive used as a value: eta-expand into a closure
+            arity = _ARITY[n]
+            params = ["%p%d" % (i,) for i in range(arity)] if False else \
+                [_gensym_prim_param(i) for i in range(arity)]
+            return ("lam", params,
+                    ("prim", n, [("var", p) for p in params]))
         return ("var", n)
     if not isinstance(x, list):
         raise LangError("bad form %r" % (x,))
