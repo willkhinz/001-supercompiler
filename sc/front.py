@@ -62,6 +62,29 @@ def _topology(items):
     return set(def_names), pure, order, lams
 
 
+def _has_selfref(e):
+    stack=[e]
+    while stack:
+        x=stack.pop()
+        if isinstance(x,tuple):
+            if x and x[0]=="selfref":
+                return True
+            stack.extend(x[1:] if len(x)>0 else [])
+        elif isinstance(x,list):
+            stack.extend(x)
+    return False
+
+
+def _replace_selfrefs(e, expr):
+    if isinstance(e,tuple):
+        if e and e[0]=="selfref":
+            return expr
+        return tuple(_replace_selfrefs(c,expr) for c in e)
+    if isinstance(e,list):
+        return [_replace_selfrefs(c,expr) for c in e]
+    return e
+
+
 class Namer:
     def __init__(self):
         self.n = 0
@@ -89,6 +112,7 @@ def closure_convert(prog: dict) -> dict:
     top_names, pure_defs, def_order, _dl = _topology(items)
     cur_def_pos = [None]  # source position of def being lifted
     _cur_name = [None]
+    _cur_fv = [None]
     # name -> (fid, [freevar names]); active letrec scope stack entries
     fn_map_stack = []
 
@@ -108,6 +132,11 @@ def closure_convert(prog: dict) -> dict:
                 fid, fvs = fn
                 return ("mkclo", fid, [("var", v) for v in fvs])
             if e[1] in pure_defs:
+                return ("mkclo", e[1], [])
+            if e[1] == _cur_name[0]:
+                fn = _cur_fv[0]
+                if fn is not None:
+                    return ("mkclo", e[1], [("var", v) for v in fn])
                 return ("mkclo", e[1], [])
             return e
         if tag == "lam":
@@ -166,6 +195,11 @@ def closure_convert(prog: dict) -> dict:
             return ("raise", go(e[1]))
         if tag == "mkclo":
             return ("mkclo", e[1], [go(a) for a in e[2]])
+        if tag == "selfref":
+            # inner lambda of the def currently being lifted; _lift's
+            # substitution already handled its own body, so this is an
+            # inner-lambda self reference -- resolve like top-level name
+            return ("mkclo", _cur_name[0], [])
         raise LangError("cc: bad node %r" % (tag,))
 
     def _letrec_simple(e, ren, names, entries, lams, ext_tops):
@@ -202,6 +236,8 @@ def closure_convert(prog: dict) -> dict:
             if v in top_names:
                 if v in pure_defs:
                     continue  # reconstructed via fresh closure at use site
+                if v == _cur_name[0]:
+                    continue  # direct self-reference: reconstructed at use site
                 # impure def captured across funds: enforce source order
                 if cur_def_pos[0] is not None and \
                         def_order.get(v, -1) >= cur_def_pos[0]:
@@ -211,7 +247,11 @@ def closure_convert(prog: dict) -> dict:
                         % (_cur_name[0], v))
             fv.append(v)
         fv = sorted(fv)
-        lifted_body = go(nbody)
+        _cur_fv[0] = fv
+        try:
+            lifted_body = go(nbody)
+        finally:
+            _cur_fv[0] = None
         fid = namer.fresh("$f")
         funds[fid] = (fv + nparams, lifted_body)
         return ("mkclo", fid, [("var", v) for v in fv])
@@ -256,6 +296,23 @@ def closure_convert(prog: dict) -> dict:
         if tag == "mkclo":
             return ("mkclo", e[1], [rename_go(a, ren) for a in e[2]])
         raise LangError("rename: bad node %r" % (tag,))
+
+    def _patch_selfrefs(e):
+        """Replace ('selfref',) placeholders once per lambda; returns the
+        tree unchanged when no placeholder is present."""
+        found = [False]
+        def walk(x):
+            tag = x[0] if isinstance(x, tuple) else None
+            if tag == "selfref":
+                found[0] = True
+                return x
+            if isinstance(x, tuple):
+                return tuple(walk(c) for c in x)
+            if isinstance(x, list):
+                return [walk(c) for c in x]
+            return x
+        out = walk(e)
+        return out if found[0] else e
 
     def _hide(ren, n):
         nb = dict(ren)

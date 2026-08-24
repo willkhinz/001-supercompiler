@@ -1,0 +1,5 @@
+(define (compose f g) (lambda (x) (f (g x))))
+(define (inc x) (+ x 1))
+(define (dbl x) (* x 2))
+(define (thrice f) (compose f (compose f f)))
+((thrice (compose inc dbl)) 10)

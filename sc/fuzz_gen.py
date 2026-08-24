@@ -38,6 +38,11 @@ def S(name):
     return ("sym", name)
 
 
+import os
+
+HIGH_FUEL = bool(os.environ.get("SC_FUZZ_HIGH"))
+
+
 def gen_program(seed):
     rng = random.Random(seed)
     g = Gen(rng)
@@ -50,6 +55,12 @@ def gen_program(seed):
     parts = []
     for name, params, fbody in funcs:
         parts.append(["define", [name] + params, fbody])
+    # guarantee every function is actually called from main
+    rr = rng
+    for i, (name, params, _fb) in enumerate(funcs):
+        lo, hi = (24, 48) if HIGH_FUEL else (2, 7)
+        args = [rr.randint(lo, hi)] + [rr.randint(0, 9)] * (len(params) - 1)
+        body = ["begin", ["print", [name] + args], body]
     parts.append(body)
     return parts
 
@@ -65,7 +76,10 @@ def _gen_func(g, idx):
     params = [fuel, acc] + extra
     scope = set(params)
     base = _pick_base(g, S(acc), scope)
-    step_acc = ["+", S(acc), r.randint(1, 4)]
+    if r.random() < 0.35:
+        step_acc = ["*", S(acc), 2]          # geometric growth -> whistle bait
+    else:
+        step_acc = ["+", S(acc), r.randint(1, 5)]
     callargs = [["-", S(fuel), 1], step_acc] + \
         [_gen_small(g, scope | {fuel}) for _ in extra]
     rec = [name] + callargs

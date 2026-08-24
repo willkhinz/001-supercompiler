@@ -1,0 +1,17 @@
+(define (len xs) (if (null? xs) 0 (+ 1 (len (cdr xs)))))
+(define (split n xs)
+  (if (= n 0) (cons '() xs)
+      (if (null? xs) (cons '() xs)
+          (let ((r (split (- n 1) (cdr xs))))
+            (cons (cons (car xs) (car r)) (cdr r))))))
+(define (merge a b)
+  (cond ((null? a) b)
+        ((null? b) a)
+        ((< (car a) (car b)) (cons (car a) (merge (cdr a) b)))
+        (else (cons (car b) (merge a (cdr b))))))
+(define (msort xs)
+  (if (null? xs) xs
+      (if (null? (cdr xs)) xs
+          (let ((s (split (quot (len xs) 2) xs)))
+            (merge (msort (car s)) (msort (cdr s)))))))
+(len (msort (list 9 4 7 2 8 1 6 3 5 0 15 10 13 12 11 14)))

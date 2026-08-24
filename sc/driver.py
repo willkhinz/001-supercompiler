@@ -152,7 +152,7 @@ class Options:
 
 
 class Cfg:
-    __slots__ = ("fid", "tree", "slots", "names", "body")
+    __slots__ = ("fid", "tree", "slots", "names", "body", "_treecache")
 
     def __init__(self, fid, tree, slots, names, body=None):
         self.fid = fid
@@ -160,10 +160,17 @@ class Cfg:
         self.slots = slots
         self.names = names
         self.body = body
+        self._treecache = {}
 
-    def as_tree(self):
+    def as_tree(self, mask=frozenset()):
+        hit = self._treecache.get(mask)
+        if hit is not None:
+            return hit
         sl = []
-        for s in self.slots:
+        for i, s in enumerate(self.slots):
+            if i in mask:
+                sl.append(("D",))
+                continue
             if is_dyn(s) or is_case(s):
                 sl.append(("D",))
             else:

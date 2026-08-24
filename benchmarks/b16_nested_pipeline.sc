@@ -1,0 +1,5 @@
+(define (range a b) (if (< a b) (cons a (range (+ a 1) b)) '()))
+(define (map f xs) (if (null? xs) '() (cons (f (car xs)) (map f (cdr xs)))))
+(define (fold f z xs) (if (null? xs) z (fold f (f z (car xs)) (cdr xs))))
+(define (sq x) (* x x))
+(fold * 1 (map sq (range 1 9)))

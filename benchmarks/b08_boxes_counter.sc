@@ -1,0 +1,5 @@
+(define c (box 0))
+(define (bump-times n)
+  (if (= n 0) (unbox c)
+      (begin (set-box! c (+ (unbox c) 1)) (bump-times (- n 1)))))
+(bump-times 3000)
