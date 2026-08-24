@@ -42,11 +42,11 @@ def gen_program(seed):
     rng = random.Random(seed)
     g = Gen(rng)
     funcs = []
-    nfuncs = rng.randint(0, 3)
+    nfuncs = rng.randint(0, 4)
     for i in range(nfuncs):
         funcs.append(_gen_func(g, i))
     body = _gen_expr(g, funcs, scope=set(), fuel_var=None,
-                     depth=0, budget=rng.randint(8, 24))
+                     depth=0, budget=rng.randint(14, 46))
     parts = []
     for name, params, fbody in funcs:
         parts.append(["define", [name] + params, fbody])
@@ -108,8 +108,8 @@ def _gen_expr(g, funcs, scope, fuel_var, depth, budget):
     choices = ["atom", "if", "let", "arith", "cmp", "list", "call"]
     if fuel_var is not None:
         pass  # recursion handled in func bodies only
-    if depth < 6:
-        choices += ["let", "arith", "box", "try", "begin"]
+    if depth < 7:
+        choices += ["let", "arith", "box", "try", "begin", "list", "cmp"]
     if depth < 4:
         choices += ["lambda_app"]
     kind = r.choice(choices)
@@ -145,7 +145,7 @@ def _gen_expr(g, funcs, scope, fuel_var, depth, budget):
         return out
     if kind == "call" and funcs:
         name, params, _b = r.choice(funcs)
-        args = [r.randint(0, 4)] + [r.randint(0, 9)] * (len(params) - 1)
+        args = [r.randint(0, 6)] + [_gen_small(g, scope) for _ in range(len(params) - 1)]
         return [name] + args
     if kind == "box":
         b = g.fresh("bx")

@@ -34,6 +34,11 @@ def embed(a, b, depth=0):
     """True iff tree a embeds into tree b."""
     if depth > 400:
         return True  # truncation biases toward the whistle (termination-safe)
+    if not isinstance(a, tuple) or not a or not isinstance(b, tuple) or not b:
+        try:
+            return bool(a == b)
+        except Exception:
+            return a is b
     ta = a[0]
     tb = b[0]
     if ta == "#deep" or tb == "#deep":
@@ -63,15 +68,11 @@ def embed(a, b, depth=0):
         if tb != "#case":
             return False
         return all(embed(x, y, depth + 1) for x, y in zip(a[1:], b[1:]))
-    if ta in ("#let", "#if", "#try", "#halt", "#raise", "#p", "#call",
-              "#mk", "#box", "#unbox", "#setbox", "#copy", "#sub",
-              "#slots", "#seq"):
-        if tb != ta:
-            return False
+    if ta == tb:
+        # generic constructor: componentwise embedding; operator/name
+        # positions (child 1 of #p/#mk) must match exactly
         if len(a) != len(b):
             return False
-        # constructor-position equality for tags/names (child 1 of #p/#mk),
-        # embedding elsewhere
         if ta in ("#p", "#mk") and a[1] != b[1]:
             return False
         return all(embed(x, y, depth + 1) for x, y in zip(a[1:], b[1:]))

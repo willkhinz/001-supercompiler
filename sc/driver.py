@@ -90,12 +90,14 @@ def valtree(v, depth=0):
         return ("i", v)
     if v is None:
         return ("nil",)
+    if isinstance(v, tuple) and v and v[0] == "err":
+        return ("e", str(v[1]))
     if is_scalar(v):
         if isinstance(v, tuple):
             return ("e", str(v[1]))
         if isinstance(v, str):
             return ("s", v)
-        return ("s", v.name)
+        return ("s", getattr(v, "name", str(v)))
     k = v[0]
     if k == "dyn":
         return ("D",)
@@ -150,13 +152,14 @@ class Options:
 
 
 class Cfg:
-    __slots__ = ("fid", "tree", "slots", "names")
+    __slots__ = ("fid", "tree", "slots", "names", "body")
 
-    def __init__(self, fid, tree, slots, names):
+    def __init__(self, fid, tree, slots, names, body=None):
         self.fid = fid
         self.tree = tree
         self.slots = slots
         self.names = names
+        self.body = body
 
     def as_tree(self):
         sl = []
@@ -169,14 +172,20 @@ class Cfg:
 
 
 class FoldEntry:
-    __slots__ = ("gname", "fid", "fixed", "params", "nslots")
+    __slots__ = ("gname", "fid", "fixed", "params", "nslots",
+                 "pattern_fixed_rest")
 
-    def __init__(self, gname, fid, fixed, params, nslots):
+    def __init__(self, gname, fid, fixed, params, nslots,
+                 pattern_fixed_rest=None):
         self.gname = gname
         self.fid = fid
         self.fixed = fixed
         self.params = params
         self.nslots = nslots
+        # {slot: Val} for slots that were equal-but-context-bound at
+        # generalization time; candidates must still match these exactly
+        # unless they are None (not traversed).
+        self.pattern_fixed_rest = pattern_fixed_rest or {}
 
 
 # ================================================================= driver
@@ -356,7 +365,7 @@ class Driver:
             raise AssertionError("rt %r" % (tag,))
 
         tree = tt(body)
-        return Cfg(fid, tree, slots, names)
+        return Cfg(fid, tree, slots, names, body)
 
     # ---------------- driving
 
@@ -775,6 +784,92 @@ class Driver:
 
     # ---- unfold / fold / generalize
 
+    def _binder_map(self, fid):
+        """Static list of every binder name occurring in a fund body."""
+        cache = getattr(self, "_binders", None)
+        if cache is None:
+            cache = {}
+            self._binders = cache
+        if fid not in cache:
+            params, body = self.funds[fid]
+            names = list(params)
+
+            def walk_term(t):
+                tag = t[0]
+                if tag in ("alet", "rlet"):
+                    names.append(t[1])
+                    walk_rhs(t[2])
+                    walk_term(t[3])
+                elif tag in ("aif", "rif"):
+                    walk_term(t[2]); walk_term(t[3])
+                elif tag == "atry":
+                    names.append(t[1])
+                    walk_term(t[2]); walk_term(t[4])
+
+            def walk_rhs(rr):
+                tag = rr[0]
+                if tag == "rsub":
+                    walk_term(rr[1])
+
+            walk_term(body)
+            cache[fid] = names
+        return cache[fid]
+
+    def _unfold_instance(self, fid):
+        """Alpha-renamed copy of a fund body with fresh binder names.
+
+        Unfolding must not reuse the template's binder names, or dynamic
+        values carried in the driver env under those names get captured by
+        the copy's own re-bindings (classic variable-capture bug).
+        """
+        params, body = self.funds[fid]
+        ren = {n: self.fresh("u") for n in self._binder_map(fid)}
+
+        def ra(a):
+            if a[0] == "avar" and a[1] in ren:
+                return ("avar", ren[a[1]])
+            return a
+
+        def rw(rr):
+            tag = rr[0]
+            if tag == "rsub":
+                return ("rsub", tm(rr[1]))
+            if tag in ("aprim", "rprim"):
+                return (tag, rr[1], [ra(a) for a in rr[2]])
+            if tag in ("aapp", "rcall"):
+                return (tag, ra(rr[1]), [ra(a) for a in rr[2]])
+            if tag in ("adirect", "rdirect"):
+                return (tag, rr[1], [ra(a) for a in rr[2]])
+            if tag in ("amkclo", "rmkclo"):
+                return (tag, rr[1], [ra(a) for a in rr[2]])
+            if tag in ("abox", "rbox", "aunbox", "runbox", "acopy", "rcopy"):
+                return (tag, ra(rr[1]))
+            if tag in ("asetbox", "rsetbox"):
+                return (tag, ra(rr[1]), ra(rr[2]))
+            if tag == "rifv":
+                return (tag, ra(rr[1]), ra(rr[2]), ra(rr[3]))
+            if tag == "rtry":
+                return (tag, tm(rr[1]), ra(rr[2]))
+            return rr
+
+        def tm(t):
+            tag = t[0]
+            if tag in ("ahalt", "rid", "araise", "rraise"):
+                return (tag, ra(t[1]))
+            if tag in ("alet", "rlet"):
+                nn = ren.get(t[1], t[1])
+                return (tag, nn, rw(t[2]), tm(t[3]))
+            if tag in ("aif", "rif"):
+                return (tag, ra(t[1]), tm(t[2]), tm(t[3]))
+            if tag == "atry":
+                nn = ren.get(t[1], t[1])
+                return ("atry", nn, tm(t[2]), ra(t[3]), tm(t[4]))
+            if tag == "rexp":
+                return ("rexp", rw(t[1]))
+            return t
+
+        return [ren[p] for p in params], tm(body), ren
+
     def unfold_sclo(self, sclo, args):
         fid = sclo[1]
         frees = list(sclo[2])
@@ -784,25 +879,32 @@ class Driver:
         if not self.may_specialize(fid):
             return self.bail_direct(sclo, args)
 
+        nparams, nbody, ren = self._unfold_instance(fid)
         env2 = {}
         for i, p in enumerate(params[:nf]):
-            env2[p] = frees[i]
+            env2[ren[p]] = frees[i]
         for i, p in enumerate(params[nf:]):
-            env2[p] = args[i]
+            env2[ren[p]] = args[i]
 
-        cfg = self.build_cfg(fid, body, env2)
+        cfg = self.build_cfg(fid, nbody, env2)
 
         fe = self.find_fold(cfg)
         if fe is not None:
             self.stats["folded"] += 1
             return self.emit_fold_call(fe, cfg)
 
-        if self.whistle_ancestor(cfg) is not None:
-            if self.generalize(cfg):
+        over_budget = not self.may_specialize(fid)
+        anc = self.whistle_ancestor(cfg) if not over_budget else \
+            self.last_same_fid(cfg)
+        if anc is not None:
+            if self.generalize(cfg, force=over_budget, anc=anc):
                 fe = self.find_fold(cfg)
                 if fe is not None:
                     self.stats["folded"] += 1
                     return self.emit_fold_call(fe, cfg)
+
+        if not self.may_specialize(fid):
+            return self.bail_direct(sclo, args)
 
         if len(self.hist) >= self.opts.max_history:
             return self.bail_direct(sclo, args)
@@ -811,7 +913,7 @@ class Driver:
         self.hist.append(cfg)
         self._attr.append(fid)
         try:
-            kb, pb = self._dt(body, env2)
+            kb, pb = self._dt(nbody, env2)
         finally:
             self.hist.pop()
             self._attr.pop()
@@ -867,7 +969,41 @@ class Driver:
 
     # ---- whistle & generalization
 
+    def last_same_fid(self, cfg):
+        for i in range(len(self.hist) - 1, -1, -1):
+            h = self.hist[i]
+            if h.fid == cfg.fid and len(h.slots) == len(cfg.slots):
+                return h
+        return None
+
+    def _mask_slots(self, cfg):
+        """Slots holding strictly-decreasing concrete ints relative to the
+        most recent same-fid configuration are countdown fuel; they must not
+        block the whistle (they terminate on their own)."""
+        last = self.last_same_fid(cfg)
+        if last is None:
+            return set()
+        mask = set()
+        for k in range(min(len(last.slots), len(cfg.slots))):
+            a, b = last.slots[k], cfg.slots[k]
+            if isinstance(a, int) and not isinstance(a, bool) and \
+                    isinstance(b, int) and not isinstance(b, bool) and b < a:
+                mask.add(k)
+        return mask
+
+    def _masked_tree(self, cfg, mask):
+        t = cfg.as_tree()
+        if not mask:
+            return t
+        slots = list(t[2][1:])
+        for k in mask:
+            if k < len(slots):
+                slots[k] = ("D",)
+        return ("#cfg", t[1], ("#slots", *slots))
+
     def whistle_ancestor(self, cfg):
+        mask = self._mask_slots(cfg)
+        tree_c = self._masked_tree(cfg, mask)
         run = 0
         for i in range(len(self.hist) - 1, -1, -1):
             anc = self.hist[i]
@@ -879,7 +1015,7 @@ class Driver:
             if len(anc.slots) != len(cfg.slots):
                 continue
             try:
-                hit = HE.embed(anc.as_tree(), cfg.as_tree())
+                hit = HE.embed(self._masked_tree(anc, mask), tree_c)
             except RecursionError:
                 hit = True
             if hit:
@@ -887,10 +1023,13 @@ class Driver:
                     return anc
         return None
 
-    def generalize(self, cur):
-        anc = self.whistle_ancestor(cur)
+    def generalize(self, cur, force=False, anc=None):
         if anc is None:
-            return False
+            anc = self.whistle_ancestor(cur)
+            if anc is None:
+                return False
+        # (the ancestor is trusted: whistle_ancestor applied the
+        # decreasing-fuel mask; budget-forced calls bypass HE entirely)
 
         nslots = min(len(anc.slots), len(cur.slots))
         fixed = {}
@@ -939,7 +1078,8 @@ class Driver:
             self.pattern_memo[pkey] = gname
             self._attr.append(cur.fid)
             try:
-                kb, pb = self._dt(self.funds[cur.fid][1], pat_env)
+                kb, pb = self._dt(cur.body or self.funds[cur.fid][1],
+                                  pat_env)
             finally:
                 self._attr.pop()
             if kb == "V":
@@ -953,15 +1093,28 @@ class Driver:
             self.res_funds[gname] = (list(gparams), gbody)
             if len(self.res_funds) > self.opts.max_funcs:
                 raise Bail()
-        self.register_fold(gname, cur.fid, fixed, params, nslots)
+        rest = {}
+        pk = set(params)
+        for k in range(nslots):
+            if k in fixed or k in pk:
+                continue
+            va = anc.slots[k] if k < len(anc.slots) else None
+            vc = cur.slots[k] if k < len(cur.slots) else None
+            if va is None and vc is None:
+                continue
+            # they were equal (that's why they're neither fixed nor params
+            # only when context-free); record whichever side is available
+            rest[k] = va if va is not None else vc
+        self.register_fold(gname, cur.fid, fixed, params, nslots, rest)
         self.stats["generalized"] += 1
         return True
 
-    def register_fold(self, gname, fid, fixed, params, nslots):
+    def register_fold(self, gname, fid, fixed, params, nslots, rest=None):
         key = (fid, tuple(sorted((k, freeze_val(v))
                                  for k, v in fixed.items())))
         self.fold_table.setdefault(key, []).append(
-            FoldEntry(gname, fid, dict(fixed), list(params), nslots))
+            FoldEntry(gname, fid, dict(fixed), list(params), nslots,
+                      dict(rest or {})))
 
     def find_fold(self, cfg):
         for (fid, _fk), entries in self.fold_table.items():
@@ -970,6 +1123,7 @@ class Driver:
             for fe in entries:
                 if fe.nslots != len(cfg.slots):
                     continue
+                pset = set(fe.params)
                 ok = True
                 for k, v in fe.fixed.items():
                     if not val_eq(v, cfg.slots[k]):
@@ -977,10 +1131,23 @@ class Driver:
                         break
                 if not ok:
                     continue
-                for k in fe.params:
-                    if not self.extractable(cfg.slots[k]):
+                for k, v in (fe.pattern_fixed_rest or {}).items():
+                    ck = cfg.slots[k]
+                    if ck is None or v is None:
+                        continue
+                    if not val_eq(v, ck):
                         ok = False
                         break
+                if not ok:
+                    continue
+                for k in range(fe.nslots):
+                    if k in fe.fixed or k in (fe.pattern_fixed_rest or {}):
+                        continue
+                    if k in pset:
+                        if not self.extractable(cfg.slots[k]):
+                            ok = False
+                            break
+                    # slots absent from both sides are unconstrained
                 if ok:
                     return fe
         return None
