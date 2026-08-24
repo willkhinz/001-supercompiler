@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+failures/
+out/
+.DS_Store
