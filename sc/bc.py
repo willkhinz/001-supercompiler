@@ -245,4 +245,10 @@ class _Gen:
             self.emit("store", idx)
             self.code[j_end] = ("jmp", len(self.code))
         else:
-            raise AssertionError("bad rhs %r" % (tag,))
+            # generic fallback: any TERM can act as a value producer
+            saved = self.terminal
+            self.terminal = ("store", idx)
+            try:
+                self.term(rr)
+            finally:
+                self.terminal = saved

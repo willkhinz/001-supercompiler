@@ -117,9 +117,15 @@ def desugar_begin(forms):
 
 
 def desugar(x):
-    # atoms
-    if isinstance(x, bool) or isinstance(x, int) or isinstance(x, str):
+    # atoms -- note: bare python strings are treated as identifiers; SC-Lang
+    # has no user-facing strings, and the s-expr printer quotes nothing that
+    # parses back as a string except explicit "..." literals.
+    if isinstance(x, bool) or isinstance(x, int):
         return ("const", x)
+    if isinstance(x, str):
+        if x == "nil":
+            return ("const", None)
+        return ("var", x)
     if _sym(x):
         n = x[1]
         if n == "nil":

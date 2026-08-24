@@ -36,6 +36,7 @@ def run(prog: dict, fuel=100_000_000):
     """prog: BytecodeProgram -> outcome dict with stats."""
     funds = prog.funds
     out = []
+    writes = []
     steps = 0
     cons_alloc = 0
     box_alloc = 0
@@ -79,6 +80,12 @@ def run(prog: dict, fuel=100_000_000):
                 elif name == "box":
                     box_alloc += 1
                     st.append(Box(args[0]))
+                elif name == "set-box!":
+                    try:
+                        st.append(prim("set-box!", args))
+                        writes.append(_norm_write(args[1]))
+                    except ScmError as e:
+                        f = _raise(frames, ("err", e.msg))
                 else:
                     try:
                         st.append(prim(name, args))
@@ -170,10 +177,22 @@ def run(prog: dict, fuel=100_000_000):
         "out": out,
         "status": status,
         "value": result,
+        "writes": writes,
         "steps": steps,
         "cons_alloc": cons_alloc,
         "box_alloc": box_alloc,
     }
+
+
+def _norm_write(v):
+    from .semantics import Sym
+    if isinstance(v, bool) or isinstance(v, int):
+        return v
+    if v is None:
+        return "()"
+    if isinstance(v, Sym):
+        return ("sym", v.name)
+    return "#obj"
 
 
 def _enter(frames, fund, locals_):

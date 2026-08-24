@@ -93,6 +93,8 @@ def valtree(v, depth=0):
     if is_scalar(v):
         if isinstance(v, tuple):
             return ("e", str(v[1]))
+        if isinstance(v, str):
+            return ("s", v)
         return ("s", v.name)
     k = v[0]
     if k == "dyn":
@@ -433,6 +435,25 @@ class Driver:
 
         raise AssertionError("_dt %r" % (tag,))
 
+    _STMT_RHS = {"aprim", "rprim", "rcall", "adirect", "rmkclo",
+                 "abox", "aunbox", "asetbox", "acopy", "rcopy"}
+
+    def rhs_as_term(self, rr):
+        """Lift an RRhs into a value-yielding TERM."""
+        if rr[0] in ("rlet", "rif", "rexp", "rid", "rraise", "rtry"):
+            return rr
+        rn = self.fresh()
+        return ("rlet", rn, rr, ("rid", ("rvar", rn)))
+
+    def stmt_seq(self, pre, rr):
+        """Sequence optional pre-term with an rhs-as-statement; the rhs
+        value is discarded."""
+        t = self.rhs_as_term(rr)
+        t = seq_term(t, ("rid", ("rconst", None)))
+        if pre is None:
+            return t
+        return seq_term(pre, t)
+
     def value_tail(self, v):
         """Terminal term producing runtime value of v."""
         if is_scalar(v):
@@ -610,17 +631,22 @@ class Driver:
             if is_case(fv):
                 rn_c = self.fresh()
                 mat = self.materialize_case(fv, rn_c)
-                ras = [self.arg_atom(v) for v in argvs]
+                ras, pre2 = self.materialize_args(argvs)
                 rn = self.fresh()
                 term = ("rexp", ("rcall", ("rvar", rn_c), ras))
-                return ("term", seq_term(mat, term),
+                full = seq_term(mat, term)
+                if pre2 is not None:
+                    full = seq_term(pre2, full)
+                return ("term", full,
                         dict(env, **{name: ("dyn", name)}))
 
             if is_dyn(fv):
-                ras = [self.arg_atom(v) for v in argvs]
+                ras, pre = self.materialize_args(argvs)
                 rn = self.fresh()
-                return ("term", ("rcall", ("rvar", fv[1]), ras),
-                        dict(env, **{name: ("dyn", name)}))
+                term = ("rexp", ("rcall", ("rvar", fv[1]), ras))
+                if pre is not None:
+                    term = seq_term(pre, term)
+                return ("term", term, dict(env, **{name: ("dyn", name)}))
 
             if fv[0] == "sclo":
                 res = self.unfold_sclo(fv, argvs)
@@ -708,9 +734,7 @@ class Driver:
         if p in ("print", "set-box!"):
             ras, pre = self.materialize_args(vs)
             rr = ("rprim", p, ras)
-            if pre is not None:
-                rr = seq_term(pre, rr)
-            return ("cstat", rr, None, env)
+            return ("cstat", self.stmt_seq(pre, rr), None, env)
 
         if p in ("unbox", "box"):
             ra, pre = self.mat_arg(vs[0])
