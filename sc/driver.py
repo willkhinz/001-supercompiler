@@ -32,6 +32,11 @@ class Bail(Exception):
     pass
 
 
+class PureEvalAbort(Exception):
+    """Raised when a bounded pure static-evaluation attempt exceeds its
+    step budget; caller falls back to full specialization."""
+
+
 # ------------------------------------------------------------------ values
 
 def is_scalar(v):
@@ -147,6 +152,7 @@ class Options:
         self.max_funcs = kw.get("max_funcs", 4000)
         self.max_cfg_depth = kw.get("max_cfg_depth", 6000)
         self.min_repeat = kw.get("min_repeat", 2)
+        self.pure_eval_steps = kw.get("pure_eval_steps", 0)
         self.no_specialize = set(kw.get("no_specialize", ()))
         self.per_func_budget = dict(kw.get("per_func_budget", {}))
 
@@ -211,6 +217,7 @@ class Driver:
         self._osz = {}
         self._attr = []
         self.hist = []
+        self.steps = 0
         self.stats = {"unfolded": 0, "folded": 0, "generalized": 0,
                       "bailed": 0, "nodes": 0}
 
@@ -377,6 +384,10 @@ class Driver:
     # ---------------- driving
 
     def _dt(self, t, env):
+        if self.opts.pure_eval_steps:
+            self.steps += 1
+            if self.steps > self.opts.pure_eval_steps:
+                raise PureEvalAbort()
         tag = t[0]
 
         if tag == "ahalt":
@@ -1009,6 +1020,8 @@ class Driver:
         return ("#cfg", t[1], ("#slots", *slots))
 
     def whistle_ancestor(self, cfg):
+        if self.opts.pure_eval_steps:
+            return None
         mask = self._mask_slots(cfg)
         tree_c = self._masked_tree(cfg, mask)
         run = 0
@@ -1026,11 +1039,28 @@ class Driver:
             except RecursionError:
                 hit = True
             if hit:
+                # A hit explained purely by countdown slots (every
+                # non-masked slot identical) is finite recursion -- keep
+                # unfolding so small concrete cases evaluate away.
+                grows = False
+                for k in range(min(len(anc.slots), len(cfg.slots))):
+                    if k in mask:
+                        continue
+                    va, vc = anc.slots[k], cfg.slots[k]
+                    if va is None or vc is None:
+                        continue
+                    if not val_eq(va, vc):
+                        grows = True
+                        break
+                if not grows:
+                    continue
                 if run >= self.opts.min_repeat:
                     return anc
         return None
 
     def generalize(self, cur, force=False, anc=None):
+        if self.opts.pure_eval_steps:
+            return False
         if anc is None:
             anc = self.whistle_ancestor(cur)
             if anc is None:

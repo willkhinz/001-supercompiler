@@ -7,7 +7,8 @@ from .sexp import parse_all
 from .lang import desugar_top, LangError
 from .front import closure_convert
 from .anf import anf_convert
-from .driver import Driver, Options as DriverOptions, Bail
+from .driver import (Driver, Options as DriverOptions, Bail,
+                     PureEvalAbort)
 from .bc import compile_ir
 
 
@@ -20,6 +21,7 @@ class CompileOptions:
         self.max_history = 60
         self.no_specialize = set()
         self.per_func_budget = {}
+        self.pure_eval_steps = 20000
 
     def apply_declares(self, forms):
         """Consume (declare ...) forms; returns remaining forms."""
@@ -94,6 +96,28 @@ def compile_source(src: str, opts: CompileOptions | None = None,
     t2 = time.time()
 
     stats = {"src_bytes": len(src)}
+    if opts.specialize:
+        # Phase 1: bounded pure static evaluation -- if the whole program
+        # evaluates concretely within the step budget, intermediates never
+        # materialize (zero allocation fusion).
+        pe = Driver(ir, DriverOptions(pure_eval_steps=opts.pure_eval_steps))
+        try:
+            res_pe = pe.run()
+            stats["phase1"] = "static-eval"
+            t3 = time.time()
+            unified_pe = dce({"funds": {**ir["funds"], **res_pe["funds"]},
+                              "main": res_pe["main"]})
+            bp = compile_ir(unified_pe)
+            t4 = time.time()
+            stats.update({"anf_funds": len(ir["funds"]),
+                          "final_funds": len(unified_pe["funds"]),
+                          "code_size": bp.total_instructions(),
+                          "t_front": t1 - t0, "t_anf": t2 - t1,
+                          "t_drive": t3 - t2, "t_bc": t4 - t3})
+            return bp
+        except (PureEvalAbort, Bail):
+            stats["phase1"] = "abort"
+
     if opts.specialize:
         dopts = DriverOptions(
             expand_factor=opts.expand_factor,
