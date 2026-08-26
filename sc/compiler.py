@@ -114,6 +114,8 @@ def compile_source(src: str, opts: CompileOptions | None = None,
                           "code_size": bp.total_instructions(),
                           "t_front": t1 - t0, "t_anf": t2 - t1,
                           "t_drive": t3 - t2, "t_bc": t4 - t3})
+            if collect_stats:
+                return bp, stats
             return bp
         except (PureEvalAbort, Bail):
             stats["phase1"] = "abort"
